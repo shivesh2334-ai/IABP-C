@@ -74,7 +74,7 @@ if 'analysis' not in st.session_state:
 if 'api_key' not in st.session_state:
     st.session_state.api_key = ''
 
-def compress_image(image, max_size_mb=4.5):
+def compress_image(image, max_size_mb=9.5):
     """
     Compress image to be under the specified size in MB while maintaining readability
     """
