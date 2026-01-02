@@ -74,6 +74,57 @@ if 'analysis' not in st.session_state:
 if 'api_key' not in st.session_state:
     st.session_state.api_key = ''
 
+def compress_image(image, max_size_mb=4.5):
+    """
+    Compress image to be under the specified size in MB while maintaining readability
+    """
+    # Start with a reasonable quality
+    quality = 95
+    
+    # Convert to RGB if necessary
+    if image.mode in ('RGBA', 'LA', 'P'):
+        background = Image.new('RGB', image.size, (255, 255, 255))
+        if image.mode == 'P':
+            image = image.convert('RGBA')
+        background.paste(image, mask=image.split()[-1] if image.mode == 'RGBA' else None)
+        image = background
+    
+    # Resize if image is very large
+    max_dimension = 1920
+    if max(image.size) > max_dimension:
+        ratio = max_dimension / max(image.size)
+        new_size = tuple(int(dim * ratio) for dim in image.size)
+        image = image.resize(new_size, Image.Resampling.LANCZOS)
+    
+    # Compress until under size limit
+    while quality > 20:
+        buffer = io.BytesIO()
+        image.save(buffer, format='JPEG', quality=quality, optimize=True)
+        size_mb = buffer.tell() / (1024 * 1024)
+        
+        if size_mb <= max_size_mb:
+            buffer.seek(0)
+            return buffer.getvalue(), size_mb
+        
+        quality -= 5
+    
+    # If still too large, resize more aggressively
+    scale_factor = 0.8
+    while max(image.size) > 800:
+        new_size = tuple(int(dim * scale_factor) for dim in image.size)
+        image = image.resize(new_size, Image.Resampling.LANCZOS)
+        
+        buffer = io.BytesIO()
+        image.save(buffer, format='JPEG', quality=85, optimize=True)
+        size_mb = buffer.tell() / (1024 * 1024)
+        
+        if size_mb <= max_size_mb:
+            buffer.seek(0)
+            return buffer.getvalue(), size_mb
+    
+    buffer.seek(0)
+    return buffer.getvalue(), size_mb
+
 # Header
 st.markdown("""
 <div class="main-header">
@@ -128,6 +179,10 @@ with tab1:
         image = Image.open(uploaded_file)
         st.image(image, caption="Uploaded IABP Monitor", use_container_width=True)
         
+        # Show original file size
+        file_size_mb = uploaded_file.size / (1024 * 1024)
+        st.info(f"📊 Original file size: {file_size_mb:.2f} MB")
+        
         col1, col2 = st.columns(2)
         
         with col1:
@@ -135,12 +190,14 @@ with tab1:
                 if not st.session_state.api_key:
                     st.error("⚠️ Please enter your Anthropic API key in the sidebar")
                 else:
-                    with st.spinner("Analyzing image..."):
+                    with st.spinner("Compressing and analyzing image..."):
                         try:
-                            # Convert image to base64
-                            buffered = io.BytesIO()
-                            image.save(buffered, format="PNG")
-                            img_base64 = base64.b64encode(buffered.getvalue()).decode()
+                            # Compress image
+                            compressed_data, compressed_size = compress_image(image)
+                            st.success(f"✅ Image compressed to {compressed_size:.2f} MB")
+                            
+                            # Convert to base64
+                            img_base64 = base64.b64encode(compressed_data).decode()
                             
                             # Call Claude API
                             client = anthropic.Anthropic(api_key=st.session_state.api_key)
@@ -156,7 +213,7 @@ with tab1:
                                                 "type": "image",
                                                 "source": {
                                                     "type": "base64",
-                                                    "media_type": "image/png",
+                                                    "media_type": "image/jpeg",
                                                     "data": img_base64,
                                                 },
                                             },
@@ -192,10 +249,12 @@ with tab1:
                                     st.session_state.parameters[key] = value
                             
                             st.success("✅ Parameters extracted successfully!")
+                            st.balloons()
                             st.rerun()
                             
                         except Exception as e:
                             st.error(f"❌ Error extracting parameters: {str(e)}")
+                            st.info("💡 Tip: Try taking a clearer photo or input parameters manually")
         
         with col2:
             if st.button("✏️ Manual Input", use_container_width=True):
@@ -343,6 +402,7 @@ Format your response with clear sections using markdown headers (##) and bullet 
                     
                     st.session_state.analysis = message.content[0].text
                     st.success("✅ Analysis generated successfully!")
+                    st.balloons()
                     st.rerun()
                     
                 except Exception as e:
@@ -366,13 +426,12 @@ with tab3:
         
         col1, col2 = st.columns([1, 3])
         with col1:
-            if st.button("🖨️ Export Report"):
-                st.download_button(
-                    label="Download as Text",
-                    data=st.session_state.analysis,
-                    file_name="iabp_analysis_report.txt",
-                    mime="text/plain"
-                )
+            st.download_button(
+                label="📄 Download Report",
+                data=st.session_state.analysis,
+                file_name="iabp_analysis_report.txt",
+                mime="text/plain"
+            )
     else:
         st.info("📋 No analysis available yet. Please input parameters and generate analysis in the Parameters tab.")
 
@@ -484,7 +543,4 @@ with tab4:
 st.markdown("---")
 st.markdown("""
 <div style="text-align: center; color: #6b7280; padding: 2rem;">
-    <p>⚠️ <strong>Medical Disclaimer:</strong> This tool is for clinical decision support only and should not replace professional medical judgment.</p>
-    <p>Powered by Claude AI | Based on evidence-based IABP protocols</p>
-</div>
-""", unsafe_allow_html=True)
+    <p>⚠️ <strong>Medical Disclaimer:</strong> This tool is for clinical decision support only 
