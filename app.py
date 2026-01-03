@@ -16,38 +16,39 @@ st.set_page_config(
 )
 
 # ===============================
-# CSS / STYLING
+# CUSTOM CSS
 # ===============================
 st.markdown("""
 <style>
-.main-header {
-    background: linear-gradient(90deg, #1e3a8a, #3b82f6);
-    padding: 2rem;
-    border-radius: 12px;
-    color: white;
-    margin-bottom: 2rem;
-}
-.stTabs [data-baseweb="tab-list"] {
-    gap: 24px;
-}
-.stTabs [data-baseweb="tab"] {
-    height: 50px;
-    white-space: pre-wrap;
-    background-color: #f8fafc;
-    border-radius: 4px 4px 0px 0px;
-    gap: 1px;
-    padding-top: 10px;
-    padding-bottom: 10px;
-}
-.stTabs [aria-selected="true"] {
-    background-color: #eff6ff;
-    border-bottom: 3px solid #3b82f6 !important;
-}
+    .main-header {
+        background: linear-gradient(90deg, #1e3a8a, #3b82f6);
+        padding: 2rem;
+        border-radius: 12px;
+        color: white;
+        margin-bottom: 2rem;
+    }
+    .parameter-card {
+        background-color: #f8fafc;
+        padding: 1.5rem;
+        border-radius: 10px;
+        border-left: 5px solid #3b82f6;
+        margin-bottom: 1rem;
+    }
+    .stButton>button {
+        border-radius: 8px;
+    }
+    .report-box {
+        background-color: #ffffff;
+        padding: 2rem;
+        border: 1px solid #e2e8f0;
+        border-radius: 12px;
+        box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1);
+    }
 </style>
 """, unsafe_allow_html=True)
 
 # ===============================
-# SESSION STATE INITIALIZATION
+# SESSION STATE
 # ===============================
 if "parameters" not in st.session_state:
     st.session_state.parameters = {
@@ -74,66 +75,65 @@ if "api_key" not in st.session_state:
 # ===============================
 def prepare_image_for_claude(image: Image.Image):
     """
-    Progressively reduces image quality and resolution until 
-    the Base64 payload is safely under 5MB.
+    Progressively reduces image quality and resolution while checking the 
+    actual Base64 string length to ensure it is under Anthropic's 5MB limit.
     """
-    MAX_BASE64_SIZE = 5 * 1024 * 1024  # 5 Million characters/bytes
-    SAFETY_MARGIN = 0.95
-    TARGET_SIZE = MAX_BASE64_SIZE * SAFETY_MARGIN
-
-    # Start with original dimensions
-    orig_w, orig_h = image.size
+    MAX_BYTES = 5_242_880  # 5MB hard limit
+    SAFETY_LIMIT = 4_900_000 # Safety target
     
-    # Try combinations of quality and scaling
-    # We prioritize keeping a reasonable resolution for text extraction
-    for scale in [1.0, 0.8, 0.6, 0.5, 0.4]:
-        for quality in [85, 70, 50, 30]:
-            # Resize
-            new_w = int(orig_w * scale)
-            new_h = int(orig_h * scale)
-            img_resized = image.resize((new_w, new_h), Image.Resampling.LANCZOS)
-            
-            # Save to buffer
-            buf = io.BytesIO()
-            img_resized.convert("RGB").save(buf, format="JPEG", quality=quality, optimize=True)
-            img_bytes = buf.getvalue()
-            
-            # Encode and check size
-            img_base64 = base64.b64encode(img_bytes).decode("utf-8")
-            if len(img_base64) <= TARGET_SIZE:
-                return img_base64, len(img_base64) / (1024 * 1024)
-                
-    raise ValueError("Could not compress image sufficiently. Please use a smaller file.")
+    # Ensure RGB (removes alpha channel size)
+    img = image.convert("RGB")
+    orig_w, orig_h = img.size
+    
+    scale = 1.0
+    quality = 90
+    
+    while True:
+        # Resize
+        new_size = (int(orig_w * scale), int(orig_h * scale))
+        resized_img = img.resize(new_size, Image.Resampling.LANCZOS)
+        
+        # Save to buffer
+        buf = io.BytesIO()
+        resized_img.save(buf, format="JPEG", quality=quality, optimize=True)
+        img_bytes = buf.getvalue()
+        
+        # Check Base64 Size
+        img_base64 = base64.b64encode(img_bytes).decode("utf-8")
+        current_size = len(img_base64)
+        
+        if current_size <= SAFETY_LIMIT:
+            return img_base64, current_size / (1024 * 1024)
+        
+        # If too big, shrink scale by 15% and drop quality
+        scale *= 0.85
+        quality -= 10
+        if quality < 20: quality = 20
+        if scale < 0.1:
+            raise ValueError("Image is too large to be compressed under 5MB.")
 
 # ===============================
-# UI - HEADER
+# HEADER
 # ===============================
 st.markdown("""
 <div class="main-header">
     <h1>🫀 IABP Monitor Analyzer</h1>
-    <p>Clinical Decision Support • AI-Powered Waveform Analysis</p>
+    <p>Clinical Decision Support for Intra-Aortic Balloon Pump Management</p>
 </div>
 """, unsafe_allow_html=True)
 
 # ===============================
-# UI - SIDEBAR
+# SIDEBAR
 # ===============================
 with st.sidebar:
     st.header("⚙️ Settings")
     st.session_state.api_key = st.text_input("Anthropic API Key", type="password", value=st.session_state.api_key)
     
     st.markdown("---")
-    st.info("""
-    **Instructions:**
-    1. Upload a clear photo of the IABP monitor.
-    2. Click 'Extract' to pull values automatically.
-    3. Verify data in 'Parameters' tab.
-    4. Generate full clinical analysis.
-    """)
+    st.warning("⚠️ **Disclaimer:** For clinical decision support only. Not a substitute for professional medical judgment.")
     
-    if st.button("Reset All Data"):
-        for key in st.session_state.parameters:
-            st.session_state.parameters[key] = ""
+    if st.button("Clear All Data", use_container_width=True):
+        st.session_state.parameters = {k: "" for k in st.session_state.parameters}
         st.session_state.analysis = None
         st.rerun()
 
@@ -141,43 +141,43 @@ with st.sidebar:
 # MAIN TABS
 # ===============================
 tab1, tab2, tab3, tab4 = st.tabs([
-    "📸 Image Upload", 
-    "🔢 Parameters", 
+    "📸 Monitor Upload", 
+    "🔢 Verify Data", 
     "📊 AI Analysis", 
     "✅ Safety Checklist"
 ])
 
 # -------------------------------
-# TAB 1: IMAGE UPLOAD
+# TAB 1: UPLOAD
 # -------------------------------
 with tab1:
-    uploaded_file = st.file_uploader("Upload IABP Monitor Screenshot/Photo", type=["jpg", "jpeg", "png"])
+    st.subheader("Upload Monitor Image")
+    uploaded_file = st.file_uploader("Select a photo of the IABP screen", type=["jpg", "jpeg", "png"])
     
     if uploaded_file:
-        img = Image.open(uploaded_file)
-        st.image(img, caption="Monitor Preview", use_container_width=True)
+        raw_img = Image.open(uploaded_file)
+        st.image(raw_img, caption="Preview", use_container_width=True)
         
-        if st.button("🤖 AI Extraction (OCR + Vision)", type="primary", use_container_width=True):
+        if st.button("🤖 Analyze Image with Claude 3.5 Sonnet", type="primary", use_container_width=True):
             if not st.session_state.api_key:
-                st.error("Missing API Key. Please provide it in the sidebar.")
+                st.error("Please provide an API Key in the sidebar.")
             else:
                 try:
-                    with st.spinner("Compressing and analyzing image..."):
-                        # Get safe base64
-                        b64_string, size_mb = prepare_image_for_claude(img)
+                    with st.spinner("Compressing and processing image..."):
+                        # Get verified safe Base64
+                        b64_string, final_mb = prepare_image_for_claude(raw_img)
                         
                         client = anthropic.Anthropic(api_key=st.session_state.api_key)
                         
-                        prompt = """Analyze this IABP (Intra-Aortic Balloon Pump) monitor image. 
-                        Extract values and return ONLY valid JSON. 
-                        Keys: heartRate, systolic, diastolic, map, pdap, baedp, paedp, assistRatio, balloonVolume, timing.
-                        Note: 
-                        - pdap is often 'Augmentation' or the highest peak.
-                        - baedp is 'Balloon Aortic End Diastolic Pressure'.
-                        - paedp is 'Patient Aortic End Diastolic Pressure'.
-                        """
+                        # System prompt for extraction
+                        prompt = (
+                            "Extract clinical values from this IABP monitor. "
+                            "Return ONLY valid JSON with keys: "
+                            "heartRate, systolic, diastolic, map, pdap, baedp, paedp, assistRatio, balloonVolume, timing. "
+                            "If a value is not found, use an empty string."
+                        )
 
-                        response = client.messages.create(
+                        message = client.messages.create(
                             model="claude-3-5-sonnet-20241022",
                             max_tokens=1000,
                             messages=[{
@@ -189,99 +189,104 @@ with tab1:
                             }]
                         )
 
-                        # Clean response text
-                        res_text = response.content[0].text
-                        if "```json" in res_text:
-                            res_text = res_text.split("```json")[1].split("```")[0]
+                        # Parse JSON logic
+                        raw_response = message.content[0].text
+                        if "```json" in raw_response:
+                            raw_response = raw_response.split("```json")[1].split("```")[0]
                         
-                        extracted = json.loads(res_text)
-                        
-                        # Merge extracted data into session state
-                        for k, v in extracted.items():
+                        data = json.loads(raw_response)
+                        for k, v in data.items():
                             if v: st.session_state.parameters[k] = str(v)
                         
-                        st.success(f"Extraction successful! (Payload size: {size_mb:.2f} MB)")
+                        st.success(f"Success! Final payload size: {final_mb:.2f} MB. Please check the 'Verify Data' tab.")
                         st.rerun()
-
                 except Exception as e:
-                    st.error(f"❌ Analysis failed: {str(e)}")
+                    st.error(f"Error extracting data: {str(e)}")
 
 # -------------------------------
-# TAB 2: PARAMETERS
+# TAB 2: VERIFY
 # -------------------------------
 with tab2:
-    st.header("Hemodynamic Values")
-    st.write("Verify the values extracted by AI or enter them manually.")
+    st.subheader("Manual Review & Data Verification")
     
     col1, col2 = st.columns(2)
     with col1:
-        st.session_state.parameters["heartRate"] = st.text_input("Heart Rate (bpm)", st.session_state.parameters["heartRate"])
-        st.session_state.parameters["systolic"] = st.text_input("Systolic Pressure (mmHg)", st.session_state.parameters["systolic"])
-        st.session_state.parameters["diastolic"] = st.text_input("Diastolic Pressure (mmHg)", st.session_state.parameters["diastolic"])
-        st.session_state.parameters["map"] = st.text_input("Mean Arterial Pressure (MAP)", st.session_state.parameters["map"])
+        st.markdown("**Hemodynamics**")
+        st.session_state.parameters["heartRate"] = st.text_input("Heart Rate", st.session_state.parameters["heartRate"])
+        st.session_state.parameters["systolic"] = st.text_input("Systolic (mmHg)", st.session_state.parameters["systolic"])
+        st.session_state.parameters["diastolic"] = st.text_input("Diastolic (mmHg)", st.session_state.parameters["diastolic"])
+        st.session_state.parameters["map"] = st.text_input("MAP", st.session_state.parameters["map"])
+        st.session_state.parameters["pdap"] = st.text_input("PDAP (Augmentation)", st.session_state.parameters["pdap"])
     
     with col2:
-        st.session_state.parameters["pdap"] = st.text_input("PDAP (Augmentation)", st.session_state.parameters["pdap"])
-        st.session_state.parameters["baedp"] = st.text_input("BAEDP (Balloon End Diastolic)", st.session_state.parameters["baedp"])
-        st.session_state.parameters["paedp"] = st.text_input("PAEDP (Patient End Diastolic)", st.session_state.parameters["paedp"])
+        st.markdown("**Pump Settings**")
+        st.session_state.parameters["baedp"] = st.text_input("BAEDP", st.session_state.parameters["baedp"])
+        st.session_state.parameters["paedp"] = st.text_input("PAEDP", st.session_state.parameters["paedp"])
         st.session_state.parameters["assistRatio"] = st.selectbox("Assist Ratio", ["1:1", "1:2", "1:3"], 
                                                                index=["1:1", "1:2", "1:3"].index(st.session_state.parameters.get("assistRatio", "1:1")))
+        st.session_state.parameters["balloonVolume"] = st.text_input("Balloon Volume (cc)", st.session_state.parameters["balloonVolume"])
+        st.session_state.parameters["timing"] = st.text_input("Timing Info", st.session_state.parameters["timing"])
 
-    if st.button("🧠 Generate Clinical Interpretation", type="primary", use_container_width=True):
+    if st.button("🧠 Generate Clinical Report", type="primary", use_container_width=True):
         if not st.session_state.api_key:
             st.error("API Key required.")
         else:
             try:
-                with st.spinner("Running clinical analysis..."):
+                with st.spinner("AI is analyzing waveforms and pressures..."):
                     client = anthropic.Anthropic(api_key=st.session_state.api_key)
-                    
-                    analysis_prompt = f"""As a Cardiac Intensivist, evaluate these IABP parameters:
+                    analysis_prompt = f"""
+                    Act as a Cardiac Intensivist. Analyze these Intra-Aortic Balloon Pump (IABP) parameters:
                     {json.dumps(st.session_state.parameters, indent=2)}
 
-                    Please provide:
-                    1. ASSESSMENT: Is augmentation effective? (PDAP vs Systolic)
-                    2. AFTERLOAD REDUCTION: Is the pump reducing afterload? (BAEDP vs PAEDP)
-                    3. TIMING: Check for early/late inflation or deflation.
-                    4. RECOMMENDATIONS: Adjustments to timing or volume.
+                    Provide:
+                    1. ASSESSMENT: Hemodynamic stability and augmentation efficacy (PDAP vs Systolic).
+                    2. AFTERLOAD REDUCTION: Evaluation of BAEDP vs PAEDP.
+                    3. TIMING VERIFICATION: Are there signs of early/late inflation/deflation?
+                    4. RECOMMENDATIONS: Specific adjustments.
                     """
                     
                     response = client.messages.create(
                         model="claude-3-5-sonnet-20241022",
-                        max_tokens=1500,
+                        max_tokens=1200,
                         messages=[{"role": "user", "content": analysis_prompt}]
                     )
                     st.session_state.analysis = response.content[0].text
                     st.rerun()
             except Exception as e:
-                st.error(f"Analysis failed: {e}")
+                st.error(f"Analysis Error: {e}")
 
 # -------------------------------
-# TAB 3: ANALYSIS DISPLAY
+# TAB 3: ANALYSIS
 # -------------------------------
 with tab3:
     if st.session_state.analysis:
-        st.markdown("### 📋 AI Clinical Report")
-        st.info(st.session_state.analysis)
-        st.download_button("Download Report (.txt)", st.session_state.analysis, file_name="iabp_analysis.txt")
+        st.markdown("<div class='report-box'>", unsafe_allow_html=True)
+        st.markdown("### 📋 AI Clinical Interpretation")
+        st.write(st.session_state.analysis)
+        st.markdown("</div>", unsafe_allow_html=True)
+        st.download_button("📥 Download Report", st.session_state.analysis, file_name="iabp_analysis.txt")
     else:
-        st.warning("No analysis generated yet. Please go to the Parameters tab.")
+        st.info("Complete data extraction or manual entry in the previous tabs to see analysis.")
 
 # -------------------------------
-# TAB 4: SAFETY CHECKLIST
+# TAB 4: SAFETY
 # -------------------------------
 with tab4:
-    st.header("IABP Safety Standards")
-    st.markdown("Confirm the following safety checks manually:")
+    st.header("Critical Safety Checklist")
+    st.markdown("Ensure all physical checks are completed:")
     
-    st.checkbox("Helium Line: No blood or condensation observed.")
-    st.checkbox("Limb Check: Pedal pulses present and leg is warm/pink.")
-    st.checkbox("Trigger: No 'Trigger Loss' or 'No Signal' alarms.")
-    st.checkbox("Augmentation: PDAP is higher than Systolic.")
-    st.checkbox("Afterload: BAEDP is lower than PAEDP.")
-    st.checkbox("Dormancy: Pump has not been off/dormant for >30 minutes.")
+    c1, c2 = st.columns(2)
+    with c1:
+        st.checkbox("Helium tank has sufficient pressure")
+        st.checkbox("No blood in the drive line (indicates rupture)")
+        st.checkbox("Limb is warm and pulses are palpable/dopplerable")
+    with c2:
+        st.checkbox("PDAP (Augmentation) is higher than Systolic")
+        st.checkbox("BAEDP is lower than PAEDP")
+        st.checkbox("ECG trigger signal is stable and consistent")
 
 # ===============================
 # FOOTER
 # ===============================
 st.markdown("---")
-st.caption("⚠️ Clinical Decision Support System: Not a replacement for professional medical judgment.")
+st.caption("IABP Monitor Analyzer v1.2 | Powered by Claude 3.5 Sonnet Vision")
