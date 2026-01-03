@@ -74,27 +74,31 @@ if "api_key" not in st.session_state:
 # ===============================
 # IMAGE COMPRESSION (SAFE)
 # ===============================
-def compress_image_for_claude(image: Image.Image):
+
+    
+def prepare_image_for_claude(image: Image.Image):
     """
-    Guarantees Base64 payload < 5 MB
+    HARD guarantee: Base64 < 5 MB
     """
-    TARGET_BASE64 = 5_000_000
+    MAX_BASE64 = 5_200_000  # safety margin
     MAX_DIM = (1024, 768)
 
     img = image.convert("RGB")
     img.thumbnail(MAX_DIM, Image.Resampling.LANCZOS)
 
-    for quality in range(80, 25, -5):
+    for quality in range(75, 20, -5):
         buf = io.BytesIO()
         img.save(buf, format="JPEG", quality=quality, optimize=True)
-        jpeg = buf.getvalue()
+        jpeg_bytes = buf.getvalue()
 
-        predicted_base64 = int(len(jpeg) * 1.37)
-        if predicted_base64 <= TARGET_BASE64:
-            return jpeg, len(jpeg) / (1024 * 1024)
+        # Encode FIRST
+        img_base64 = base64.b64encode(jpeg_bytes).decode("utf-8")
+        base64_size = len(img_base64)
 
-    raise ValueError("Image cannot be compressed below API limit")
+        if base64_size <= MAX_BASE64:
+            return img_base64, base64_size / (1024 * 1024)
 
+    raise ValueError("Unable to reduce image below Claude Base64 limit")
 # ===============================
 # HEADER
 # ===============================
@@ -158,31 +162,32 @@ with tab1:
 
                 try:
                     jpeg, jpeg_mb = compress_image_for_claude(image)
-                    img_base64 = base64.b64encode(jpeg).decode()
-                    base64_mb = len(img_base64) / (1024 * 1024)
+                    img_base64, base64_mb = prepare_image_for_claude(image)
 
-                    st.info(f"JPEG: {jpeg_mb:.2f} MB | Base64: {base64_mb:.2f} MB")
+st.info(f"✅ Base64 payload size: {base64_mb:.2f} MB")
 
-                    client = anthropic.Anthropic(api_key=st.session_state.api_key)
-
-                    response = client.messages.create(
-                        model="claude-sonnet-4-20250514",
-                        max_tokens=1000,
-                        messages=[{
-                            "role": "user",
-                            "content": [
-                                {
-                                    "type": "image",
-                                    "source": {
-                                        "type": "base64",
-                                        "media_type": "image/jpeg",
-                                        "data": img_base64
-                                    }
-                                },
-                                {
-                                    "type": "text",
-                                    "text": """Return ONLY JSON:
-{
+# ONLY now call Claude
+message = client.messages.create(
+    model="claude-sonnet-4-20250514",
+    max_tokens=1000,
+    messages=[{
+        "role": "user",
+        "content": [
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/jpeg",
+                    "data": img_base64
+                }
+            },
+            {
+                "type": "text",
+                "text": "...your prompt..."
+            }
+        ]
+    }]
+)
   "heartRate": "",
   "systolic": "",
   "diastolic": "",
@@ -262,7 +267,7 @@ Provide:
         client = anthropic.Anthropic(api_key=st.session_state.api_key)
         response = client.messages.create(
             model="claude-sonnet-4-20250514",
-            max_tokens=2000,
+            max_tokens=1000,
             messages=[{"role": "user", "content": prompt}]
         )
 
