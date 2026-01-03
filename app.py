@@ -74,55 +74,52 @@ if 'analysis' not in st.session_state:
 if 'api_key' not in st.session_state:
     st.session_state.api_key = ''
 
-def compress_image(image, max_size_mb=9.5):
+def compress_image(image, max_size_bytes=4_800_000):
     """
-    Compress image to be under the specified size in MB while maintaining readability
+    Compress image to be under 4.8MB (safely below 5MB limit)
+    Returns: (compressed_bytes, size_in_mb)
     """
-    # Start with a reasonable quality
-    quality = 95
-    
     # Convert to RGB if necessary
     if image.mode in ('RGBA', 'LA', 'P'):
         background = Image.new('RGB', image.size, (255, 255, 255))
         if image.mode == 'P':
             image = image.convert('RGBA')
-        background.paste(image, mask=image.split()[-1] if image.mode == 'RGBA' else None)
+        if image.mode in ('RGBA', 'LA'):
+            background.paste(image, mask=image.split()[-1])
+        else:
+            background.paste(image)
         image = background
+    elif image.mode != 'RGB':
+        image = image.convert('RGB')
     
-    # Resize if image is very large
-    max_dimension = 1920
-    if max(image.size) > max_dimension:
-        ratio = max_dimension / max(image.size)
-        new_size = tuple(int(dim * ratio) for dim in image.size)
+    # First, aggressively resize if needed
+    max_pixels = 1920 * 1080  # HD resolution
+    current_pixels = image.size[0] * image.size[1]
+    
+    if current_pixels > max_pixels:
+        scale = (max_pixels / current_pixels) ** 0.5
+        new_size = (int(image.size[0] * scale), int(image.size[1] * scale))
         image = image.resize(new_size, Image.Resampling.LANCZOS)
     
-    # Compress until under size limit
-    while quality > 20:
+    # Try different quality levels
+    for quality in [85, 75, 65, 55, 45, 35, 25]:
         buffer = io.BytesIO()
         image.save(buffer, format='JPEG', quality=quality, optimize=True)
-        size_mb = buffer.tell() / (1024 * 1024)
+        size = buffer.tell()
         
-        if size_mb <= max_size_mb:
-            buffer.seek(0)
-            return buffer.getvalue(), size_mb
-        
-        quality -= 5
-    
-    # If still too large, resize more aggressively
-    scale_factor = 0.8
-    while max(image.size) > 800:
-        new_size = tuple(int(dim * scale_factor) for dim in image.size)
-        image = image.resize(new_size, Image.Resampling.LANCZOS)
-        
-        buffer = io.BytesIO()
-        image.save(buffer, format='JPEG', quality=85, optimize=True)
-        size_mb = buffer.tell() / (1024 * 1024)
-        
-        if size_mb <= max_size_mb:
-            buffer.seek(0)
+        if size <= max_size_bytes:
+            size_mb = size / (1024 * 1024)
             return buffer.getvalue(), size_mb
     
-    buffer.seek(0)
+    # If still too large, resize more
+    scale = (max_size_bytes / size) ** 0.5
+    new_size = (int(image.size[0] * scale * 0.9), int(image.size[1] * scale * 0.9))
+    image = image.resize(new_size, Image.Resampling.LANCZOS)
+    
+    buffer = io.BytesIO()
+    image.save(buffer, format='JPEG', quality=70, optimize=True)
+    size_mb = buffer.tell() / (1024 * 1024)
+    
     return buffer.getvalue(), size_mb
 
 # Header
@@ -168,6 +165,16 @@ tab1, tab2, tab3, tab4 = st.tabs([
 with tab1:
     st.header("Upload IABP Monitor Image")
     
+    st.markdown("""
+    <div class="parameter-box">
+        <strong>📸 Tips for Best Results:</strong><br>
+        • Ensure good lighting and clear focus on the monitor<br>
+        • Capture all visible parameters (HR, BP, waveforms)<br>
+        • If upload fails, try taking a new photo at lower resolution<br>
+        • Alternatively, use the Parameters tab for manual entry
+    </div>
+    """, unsafe_allow_html=True)
+    
     uploaded_file = st.file_uploader(
         "Choose an image file",
         type=['png', 'jpg', 'jpeg'],
@@ -175,17 +182,29 @@ with tab1:
     )
     
     if uploaded_file is not None:
-        # Display image
-        image = Image.open(uploaded_file)
-        st.image(image, caption="Uploaded IABP Monitor", use_container_width=True)
-        
-        # Show original file size
-        file_size_mb = uploaded_file.size / (1024 * 1024)
-        st.info(f"📊 Original file size: {file_size_mb:.2f} MB")
+        # Load and display image
+        try:
+            # Load image into memory
+            image_data = uploaded_file.read()
+            uploaded_file.seek(0)  # Reset file pointer
+            image = Image.open(io.BytesIO(image_data))
+            
+            st.image(image, caption="Uploaded IABP Monitor", use_container_width=True)
+            
+            # Show original file size and dimensions
+            file_size_mb = len(image_data) / (1024 * 1024)
+            st.info(f"📊 Original: {file_size_mb:.2f} MB | Dimensions: {image.size[0]} x {image.size[1]} pixels | Format: {image.format}")
+            
+            if file_size_mb > 15:
+                st.warning("⚠️ Very large image detected. Compression may take a moment...")
+        except Exception as e:
+            st.error(f"Error loading image: {e}")
+            image = None
         
         col1, col2 = st.columns(2)
         
-        with col1:
+        if image:  # Only show buttons if image loaded successfully
+            with col1:
             if st.button("🤖 Extract Parameters with AI", type="primary", use_container_width=True):
                 if not st.session_state.api_key:
                     st.error("⚠️ Please enter your Anthropic API key in the sidebar")
@@ -193,11 +212,31 @@ with tab1:
                     with st.spinner("Compressing and analyzing image..."):
                         try:
                             # Compress image
-                            compressed_data, compressed_size = compress_image(image)
-                            st.success(f"✅ Image compressed to {compressed_size:.2f} MB")
-                            
-                            # Convert to base64
-                            img_base64 = base64.b64encode(compressed_data).decode()
+                            with st.status("Processing image...", expanded=True) as status:
+                                st.write("📦 Compressing image...")
+                                compressed_data, compressed_size = compress_image(image)
+                                
+                                # Verify size
+                                actual_size = len(compressed_data)
+                                actual_size_mb = actual_size / (1024 * 1024)
+                                st.write(f"✅ Compressed to {actual_size_mb:.2f} MB ({actual_size:,} bytes)")
+                                
+                                if actual_size > 5_000_000:
+                                    st.error(f"⚠️ Image still too large: {actual_size_mb:.2f} MB")
+                                    raise ValueError(f"Compressed image is {actual_size_mb:.2f} MB, exceeds 5MB limit")
+                                
+                                st.write("🔄 Converting to base64...")
+                                img_base64 = base64.b64encode(compressed_data).decode()
+                                base64_size_mb = len(img_base64) / (1024 * 1024)
+                                st.write(f"📊 Base64 size: {base64_size_mb:.2f} MB")
+                                
+                                # Show compressed preview
+                                compressed_image = Image.open(io.BytesIO(compressed_data))
+                                with st.expander("🔍 Preview compressed image"):
+                                    st.image(compressed_image, caption=f"Compressed: {actual_size_mb:.2f} MB", use_container_width=True)
+                                
+                                st.write("🤖 Sending to Claude API...")
+                                status.update(label="✅ Image prepared successfully", state="complete")
                             
                             # Call Claude API
                             client = anthropic.Anthropic(api_key=st.session_state.api_key)
@@ -253,8 +292,21 @@ with tab1:
                             st.rerun()
                             
                         except Exception as e:
-                            st.error(f"❌ Error extracting parameters: {str(e)}")
-                            st.info("💡 Tip: Try taking a clearer photo or input parameters manually")
+                            error_msg = str(e)
+                            st.error(f"❌ Error: {error_msg}")
+                            
+                            if "exceeds 5 MB" in error_msg or "5242880" in error_msg:
+                                st.error("""
+                                🔴 **Image Too Large**
+                                
+                                The image compression didn't reduce the size enough. Please try:
+                                1. Taking a new photo at lower resolution
+                                2. Using your phone's camera on a lower quality setting
+                                3. Taking a screenshot instead of a photo
+                                4. Using the Manual Input option in the Parameters tab
+                                """)
+                            else:
+                                st.info("💡 Tip: Try manual input in the Parameters tab or take a clearer photo")
         
         with col2:
             if st.button("✏️ Manual Input", use_container_width=True):
@@ -543,4 +595,7 @@ with tab4:
 st.markdown("---")
 st.markdown("""
 <div style="text-align: center; color: #6b7280; padding: 2rem;">
-    <p>⚠️ <strong>Medical Disclaimer:</strong> This tool is for clinical decision support only 
+    <p>⚠️ <strong>Medical Disclaimer:</strong> This tool is for clinical decision support only and should not replace professional medical judgment.</p>
+    <p>Powered by Claude AI | Based on evidence-based IABP protocols</p>
+</div>
+""", unsafe_allow_html=True)
