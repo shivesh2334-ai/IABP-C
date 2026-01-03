@@ -110,6 +110,9 @@ def compress_image(image, max_size_bytes=4_800_000):
         if size <= max_size_bytes:
             size_mb = size / (1024 * 1024)
             return buffer.getvalue(), size_mb
+        if uploaded_file.size > 3 * 1024 * 1024:
+    st.warning("Image too large. Please upload a smaller image or cropped photo.")
+    st.stop()
     
     # If still too large, resize more
     scale = (max_size_bytes / size) ** 0.5
