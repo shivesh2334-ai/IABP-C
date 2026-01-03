@@ -74,56 +74,65 @@ if 'analysis' not in st.session_state:
 if 'api_key' not in st.session_state:
     st.session_state.api_key = ''
 
-def compress_image(image, max_size_bytes=4_800_000):
+def compress_image(image, target_size_bytes=4_500_000):
     """
-    Compress image to be under 4.8MB (safely below 5MB limit)
+    Aggressively compress image to be under 4.5MB (safely below 5MB limit)
     Returns: (compressed_bytes, size_in_mb)
     """
-    # Convert to RGB if necessary
-    if image.mode in ('RGBA', 'LA', 'P'):
-        background = Image.new('RGB', image.size, (255, 255, 255))
-        if image.mode == 'P':
-            image = image.convert('RGBA')
-        if image.mode in ('RGBA', 'LA'):
-            background.paste(image, mask=image.split()[-1])
+    # Create a copy to avoid modifying original
+    img = image.copy()
+    
+    # Convert to RGB
+    if img.mode != 'RGB':
+        if img.mode in ('RGBA', 'LA'):
+            background = Image.new('RGB', img.size, (255, 255, 255))
+            if img.mode == 'RGBA':
+                background.paste(img, mask=img.split()[3])
+            else:
+                background.paste(img, mask=img.split()[1])
+            img = background
         else:
-            background.paste(image)
-        image = background
-    elif image.mode != 'RGB':
-        image = image.convert('RGB')
+            img = img.convert('RGB')
     
-    # First, aggressively resize if needed
-    max_pixels = 1920 * 1080  # HD resolution
-    current_pixels = image.size[0] * image.size[1]
+    # Start with aggressive resize - aim for 1280x720 or smaller
+    max_width = 1280
+    max_height = 720
     
-    if current_pixels > max_pixels:
-        scale = (max_pixels / current_pixels) ** 0.5
-        new_size = (int(image.size[0] * scale), int(image.size[1] * scale))
-        image = image.resize(new_size, Image.Resampling.LANCZOS)
+    if img.size[0] > max_width or img.size[1] > max_height:
+        img.thumbnail((max_width, max_height), Image.Resampling.LANCZOS)
     
-    # Try different quality levels
-    for quality in [85, 75, 65, 55, 45, 35, 25]:
+    # Try progressively lower quality
+    for quality in [80, 70, 60, 50, 40, 30, 20, 15, 10]:
         buffer = io.BytesIO()
-        image.save(buffer, format='JPEG', quality=quality, optimize=True)
-        size = buffer.tell()
+        img.save(buffer, format='JPEG', quality=quality, optimize=True)
+        buffer.seek(0)
+        compressed_bytes = buffer.read()
+        size = len(compressed_bytes)
         
-        if size <= max_size_bytes:
-            size_mb = size / (1024 * 1024)
-            return buffer.getvalue(), size_mb
-        if uploaded_file.size > 3 * 1024 * 1024:
-    st.warning("Image too large. Please upload a smaller image or cropped photo.")
-    st.stop()
+        if size <= target_size_bytes:
+            return compressed_bytes, size / (1024 * 1024)
     
-    # If still too large, resize more
-    scale = (max_size_bytes / size) ** 0.5
-    new_size = (int(image.size[0] * scale * 0.9), int(image.size[1] * scale * 0.9))
-    image = image.resize(new_size, Image.Resampling.LANCZOS)
+    # If still too large, resize even more aggressively
+    for scale in [0.9, 0.8, 0.7, 0.6, 0.5, 0.4]:
+        new_size = (int(img.size[0] * scale), int(img.size[1] * scale))
+        resized = img.resize(new_size, Image.Resampling.LANCZOS)
+        
+        buffer = io.BytesIO()
+        resized.save(buffer, format='JPEG', quality=60, optimize=True)
+        buffer.seek(0)
+        compressed_bytes = buffer.read()
+        size = len(compressed_bytes)
+        
+        if size <= target_size_bytes:
+            return compressed_bytes, size / (1024 * 1024)
     
+    # Last resort - very small size
+    img.thumbnail((640, 480), Image.Resampling.LANCZOS)
     buffer = io.BytesIO()
-    image.save(buffer, format='JPEG', quality=70, optimize=True)
-    size_mb = buffer.tell() / (1024 * 1024)
-    
-    return buffer.getvalue(), size_mb
+    img.save(buffer, format='JPEG', quality=50, optimize=True)
+    buffer.seek(0)
+    compressed_bytes = buffer.read()
+    return compressed_bytes, len(compressed_bytes) / (1024 * 1024)
 
 # Header
 st.markdown("""
@@ -196,10 +205,24 @@ with tab1:
             
             # Show original file size and dimensions
             file_size_mb = len(image_data) / (1024 * 1024)
-            st.info(f"📊 Original: {file_size_mb:.2f} MB | Dimensions: {image.size[0]} x {image.size[1]} pixels | Format: {image.format}")
             
-            if file_size_mb > 15:
-                st.warning("⚠️ Very large image detected. Compression may take a moment...")
+            # Warning for very large files
+            if file_size_mb > 20:
+                st.warning(f"""
+                ⚠️ **Very Large File Detected: {file_size_mb:.1f} MB**
+                
+                Files over 20MB are difficult to compress enough for the API.
+                
+                **Recommended:** Take a new photo at lower resolution or use a screenshot.
+                
+                You can still try compression below, but success is not guaranteed.
+                """)
+            elif file_size_mb > 10:
+                st.info(f"📊 File size: {file_size_mb:.2f} MB - Compression will be aggressive")
+            else:
+                st.success(f"📊 File size: {file_size_mb:.2f} MB - Good size for processing")
+            
+            st.caption(f"Dimensions: {image.size[0]} x {image.size[1]} pixels | Format: {image.format}")
         except Exception as e:
             st.error(f"Error loading image: {e}")
             image = None
