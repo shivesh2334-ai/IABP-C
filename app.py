@@ -561,7 +561,7 @@ with tab2:
         st.session_state.parameters['mode'] = st.selectbox(
             "Operating Mode",
             options=['AutoPilot', 'Semi-Auto', 'Manual'],
-            index=['AutoPilot', 'Semi-Auto', 'Manual'].index(st.session_state.parameters['mode'])
+            index=['AutoPilot', 'Auto' , 'Semi-Auto', 'Manual'].index(st.session_state.parameters['mode'])
         )
     
     with col2:
